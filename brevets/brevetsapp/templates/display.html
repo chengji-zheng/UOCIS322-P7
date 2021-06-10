@@ -1,0 +1,12 @@
+<html>
+<head>
+	<h3> Display </h3>
+</head>
+<body>
+	{% for item in items %}
+	<div> 
+		<p>{{item.open_time_field + " ~ " + item.close_time_field}}<p>
+	</div>
+	{% endfor %}
+</body>
+</html>
