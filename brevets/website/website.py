@@ -2,30 +2,30 @@
 
 import logging # Debug using
 from urllib.parse import urlparse, urljoin
+import json
 from flask import Flask, request, render_template, redirect, url_for, flash, abort, session
 from flask_login import (LoginManager, current_user, login_required,
                          login_user, logout_user, UserMixin,
                          confirm_login, fresh_login_required)
 from flask_wtf import FlaskForm as Form
 from wtforms import BooleanField, StringField, PasswordField, validators
-from passlib.apps import custom_app_context as pwd_context
+from passlib.hash import sha256_crypt as pwd_context
 from itsdangerous import (TimedJSONWebSignatureSerializer \
                                   as Serializer, BadSignature, \
                                   SignatureExpired)
 import requests
 import flask
 
+# Form for user login
 class LoginForm(Form):
-    username = StringField('Username', [
-        validators.Length(min=2, max=25,
-                          message=u"Huh, little too short for a username."),
-        validators.InputRequired(u"Forget something?")])
-    password = PasswordField("Password", [validators.Length(min=6, max=16, message=u"Huh, little too short for a password."), validators.InputRequired(u"Forget something?")])
+    username = StringField('Username', [validators.Length(min=4, max=25, message=u"Huh, little too short for a username."), validators.InputRequired(u"Forget something?")])
+    password = PasswordField("Password", [validators.Length(min=4, max=16, message=u"Huh, little too short for a password."), validators.InputRequired(u"Forget something?")])
     remember = BooleanField('Remember me')
 
+# Form for user creating account
 class RegForm(Form):
-    username = StringField('Username', [validators.Length(min=2, max=25, message=u"Huh, little too short for a username."), validators.InputRequired(u"Forget something?")])
-    password = PasswordField("Password", [validators.Length(min=6, max=16, message=u"Huh, little too short for a password."), validators.InputRequired(u"Forget something?")])
+    username = StringField('Username', [validators.Length(min=4, max=25, message=u"Huh, little too short for a username."), validators.InputRequired(u"Forget something?")])
+    password = PasswordField("Password", [validators.Length(min=4, max=16, message=u"Huh, little too short for a password."), validators.InputRequired(u"Forget something?")])
 
 
 def is_safe_url(target):
@@ -36,9 +36,9 @@ def is_safe_url(target):
     test_url = urlparse(urljoin(request.host_url, target))
     return test_url.scheme in ('http', 'https') and ref_url.netloc == test_url.netloc
 
-
+# User object
 class User(UserMixin):
-    def __init__(self, id, name, password, token):
+    def __init__(self, id, name, token):
         self.id = id
         self.name = name
         self.token = token 
@@ -63,7 +63,6 @@ login_manager.needs_refresh_message_category = "info"
 
 
 @login_manager.user_loader
-
 def load_user(user_id):
     """
     This callback is used to reload the user object from the user ID stored in the session. 
@@ -72,57 +71,66 @@ def load_user(user_id):
     if "name" in session or "token" in session:
         if session["name"] == None or  session["token"] == None:
             return None
-    return User(int(user_id), session["name"], session["token"])
+    return User(user_id, session["name"], session["token"])
 
 
 login_manager.init_app(app)
 
-def hash_password(password):
-    return pwd_context.encrypt(password)
+salt = "abcdefg"
 
-# Also, add a function to handle the logic for reg.
+def hash_password(password):
+    return pwd_context.using(salt = salt).encrypt(password)
+
+
+# Handling user register at the frontend.
 @app.route("/register", methods=["GET", "POST"])
 def register():
     form = RegForm()
     if form.validate_on_submit() and request.method == "POST" and "username" in request.form and "password" in request.form:
         username = request.form["username"]
         password = request.form["password"]
+        # Encrypted the password before send it to db -- for security reason.
         encryptedPW = hash_password(password)
         # Send a request to api and add to db.
-        req = requests.get('http://restapi:5000/register/', {'username': username, 'password':  password})
+        req = requests.post('http://restapi:5000/register/', {'username': username, 'password':  encryptedPW})
         # Then checking the HTTP status code ...
         if req.status_code == 201:
             flash("SUCCESS!")
-        flash("A MESSAGE HERE")
+        else:
+            flash("Something failed")
     
-    return render_template("login.html", form=form)
+    return render_template("register.html", form=form)
 
 
-# And fix the login under login.
+# Handling user login at the frontend.
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    # TODO Need to set sessions somewhere -- Using flask_login
     form = LoginForm()
     if form.validate_on_submit() and request.method == "POST" and "username" in request.form:
         username = request.form["username"]
         password = request.form["password"]
         encryptedPW = hash_password(password)
-        # Not sure here ... 
-        req = requests.get('http://restapi:5000/login/' + "?username=" + username + "&password=" + password)
-        # If user in db
+        # Get the username and password from the server
+        req = requests.get('http://restapi:5000/token/' + "?username=" + username + "&password=" + encryptedPW)
+        response = req.json()
+        
+        # If OK, then create a new user object and passed the requested data to it.
         if req.status_code == 200:
+            currentUser = User(response["id"], response["username"], response["token"])
+            session["name"] = response["username"]      # Setting a session
+            session["token"] = response["token"]
             remember = request.form.get("remember", "false") == "true"
-            if login_user(User(username),remember=remember): # Double check here? later
+            if login_user(currentUser,remember=remember): 
                 flash("Logged in!")
                 flash("I'll remember you") if remember else None
                 next = request.args.get("next")
                 if not is_safe_url(next):
                     abort(400)
-                return redirect(next or url_for('index'))
+                return redirect(next or url_for('website'))
             else:
                 flash("Sorry, but you could not log in.")
         else:
-            flash(u"Invalid username.")
+            flash(u"Invalid Info.")
     return render_template("login.html", form=form)
 
 
@@ -131,39 +139,39 @@ def login():
 def logout():
     logout_user()
     flash("Logged out.")
-    return redirect(url_for("index"))
-
+    return redirect(url_for("website"))
 
 
 @app.route('/')
-@app.route('/index')
-def home():
+@app.route('/website')
+@login_required
+def website():
     return render_template('website.html')
 
 @app.route("/secret")
 @login_required
 def secret():
-    flash("Welcome: {current_user.name}")
+    flash(f"Welcome: {current_user.name}")
     return render_template("website.html")
 
 @app.route('/listAll')
 def listAll():
     fileType = request.args.get("format") # Get File Type fetched from clientSide
     qty = request.args.get("qty")    # get the quantity from the clientSide
-    r = requests.get('http://restapi:5000/listAll' + "/" + fileType + "&token=" + current_user.token)
+    r = requests.get('http://restapi:5000/listAll' + "/" + fileType + "?token=" + current_user.token)
     return r.text
 
 @app.route('/listOpenOnly')
 def listOpenOnly():
     fileType = request.args.get("format") # Get File Type fetched from clientSide
-    qty = request.args.get("qty", default=0, type=int)    # get the quantity from the clientSide
+    qty = request.args.get("qty", default=0, type=str)    # get the quantity from the clientSide
     r = requests.get('http://restapi:5000/listOpenOnly' + "/" + fileType + "?top=" + qty + "&token=" + current_user.token)
     return r.text
 
 @app.route('/listCloseOnly')
 def listCloseOnly():
     fileType = request.args.get("format") # Get File Type fetched from clientSide
-    qty = request.args.get("qty", default=0, type=int)    # get the quantity from the clientSide
+    qty = request.args.get("qty", default=0, type=str)    # get the quantity from the clientSide
     r = requests.get('http://restapi:5000/listCloseOnly' + "/" + fileType + "?top=" + qty + "&token=" + current_user.token)
     return r.text
 

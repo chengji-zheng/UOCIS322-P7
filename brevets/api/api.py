@@ -8,18 +8,26 @@ from itsdangerous import (TimedJSONWebSignatureSerializer \
                                   as Serializer, BadSignature, \
                                   SignatureExpired)
 import time
+import logging      # Debugging Purpose
 
 
 app = Flask(__name__)
 client = MongoClient('mongodb://' + os.environ['MONGODB_HOSTNAME'], 27017)
-ourdb =  client.tododb
-userdb = client.users
+ourdb =  client.tododb      # DB for storing Brevets time data
+userdb = client.users       # DB for storing User Info
 
 api = Api(app)
 SECRET_KEY = 'test1234@#$'
 
 
 class listAll(Resource):
+    """
+        In this class, it pulls all brevets time data that stored in the database and bring them back 
+        to the client side.
+
+        For project 7, we should get the token from the client side and verify it for security reason.
+        If passed the verification, then pull the requested data. Otherwise, return error code 401.
+    """
     def csv_form(self):
         output = ""
         # The first line
@@ -36,14 +44,26 @@ class listAll(Resource):
     def json_form(self):
         return list(ourdb.tododb.find({},{"_id":0, "open_time_field":1, "close_time_field":1}))
    
-    def get(self, dataType="json"):
-        if dataType == "csv":
-            return self.csv_form()
-        return self.json_form()
+    def get(self, dataType="json"):     
+        getToken = request.args.get('token')
+        # app.logger.debug("TOKEN ===>   ", getToken)           #Testing
+        verified = verify_auth_token(getToken)
+        # app.logger.debug("Verified TOKEN ===>   ", verified)  #Testing
+        if verified:
+            if dataType == "csv":
+                return self.csv_form()
+            return self.json_form()
+        else:
+            return 401
         
-
 class listOpenOnly(Resource):
-    
+    """
+        In this class, it pulls only open brevets time that stored in the database with a quantity that 
+        the user wants and bring them back to the client side.
+
+        For project 7, we should get the token from the client side and verify it for security reason.
+        If passed the verification, then pull the requested data. Otherwise, return error code 401.
+    """
     def csv_form(self, qty):
         temp = []
         output = ""
@@ -65,7 +85,6 @@ class listOpenOnly(Resource):
             for d in temp:
                 output += ",".join(list(d.values()))
                 output += "\n"
-
         return output
     
     def json_form(self, qty):
@@ -79,15 +98,27 @@ class listOpenOnly(Resource):
         return temp
             
     def get(self, dataType="json"):
-        qty = int(request.args.get("top", default=0, type=int))
-        if dataType == "csv":
-            return self.csv_form(qty)
-        return self.json_form(qty)
-
+        token = request.args.get('token')
+        # app.logger.debug("TOKEN ===>   ", token)
+        verified = verify_auth_token(token)
+        # app.logger.debug("Verified TOKEN ===>   ", verified)
+        if verified:
+            qty = int(request.args.get("top", default=0, type=int))
+            if dataType == "csv":
+                return self.csv_form(qty)
+            return self.json_form(qty)
+        else:
+            return 401
 
 # Handling close time, similar to the logic where used in handling open time
 class listCloseOnly(Resource):
+    """
+        In this class, it pulls only close brevets time that stored in the database with a quantity that 
+        the user wants and bring them back to the client side.
 
+        For project 7, we should get the token from the client side and verify it for security reason.
+        If passed the verification, then pull the requested data. Otherwise, return error code 401.
+    """
     def csv_form(self, qty):
         temp = []
         output = ""
@@ -122,45 +153,47 @@ class listCloseOnly(Resource):
         return temp
             
     def get(self, dataType="json"):
-        qty = int(request.args.get("top", default=0, type=int))
-        if dataType == "csv":
-            return self.csv_form(qty)
-        return self.json_form(qty)
+        token = request.args.get('token')
+        verified = verify_auth_token(token)
+        if verified:
+            qty = int(request.args.get("top", default=0, type=int))
+            if dataType == "csv":
+                return self.csv_form(qty)
+            return self.json_form(qty)
+        else:
+            return 401
 
 class register(Resource):
     def post(self):
+        # Gets the username and password
         username = request.form.get("username", type=str)
         password = request.form.get("password", type=str)
-        # Or it's not necessary to convert find() to a list
-        # If pop up error(s), replace the line below with find_one()
-        if len(list(userdb.users.find({"username": username}))) != 0:
+
+        # If the username already exist
+        if userdb.users.find_one({"username": username}):
             # Or directly return an error message
             return abort(400)
-        # This elif statement seems redundent.
-        elif password == "":
-            return abort(400)
         else:
+            # Then hashed the password and store into database.
             encryptedPW = hash_password(password)
-            userdb.users.insert_one({"username"[username], "password"[encryptedPW]})
+            userdb.users.insert({"username":username, "password": encryptedPW})
             return "SUCCESS", 201
 
-
-class login():
+# Login
+class token(Resource):
     def get(self):
-        username = request.form.get("username", type=str)
-        password = request.form.get("password", type=str)
+        # Gets the username and password
+        username = request.args.get("username", type=str)
+        password = request.args.get("password", type=str)
 
-        # Or it's not necessary to convert find() to a list
-        # If pop up error(s), replace the line below with find_one()
-        if len(list(userdb.users.find({"username": username}))) == 0:
-            return abort(400)
-        elif password == "":
-            return abort(400)
-        encryptedPW = hash_password(password)
-        db = userdb.users.find({"username": username, "password":encryptedPW})
-        if db == []:
-            return abort(400) # Incorrect PW
-        return generate_auth_token(), 200
+        current_user = userdb.users.find_one({"username": username})
+        if not current_user:    # If not find the username in db
+            return abort(401)
+        if not verify_password(password, current_user["password"]):
+            return abort(401)   # Incorrect PW
+        else:
+            token = generate_auth_token(username).decode('utf-8')
+            return {"token" : token, "username": username, "id" : str(current_user["_id"])}, 200
 
 
 def hash_password(password):
@@ -170,9 +203,9 @@ def hash_password(password):
 def verify_password(password, hashVal):
     return pwd_context.verify(password, hashVal)
 
-def generate_auth_token(expiration=600):
+def generate_auth_token(username, expiration=120):
    s = Serializer(SECRET_KEY, expires_in=expiration)
-   return s.dumps({'id': 5, 'name': 'Ryan'})
+   return s.dumps({"username":username})
 
 
 def verify_auth_token(token):
@@ -180,10 +213,10 @@ def verify_auth_token(token):
     try:
         data = s.loads(token)
     except SignatureExpired:
-        return "Expired token!"    # valid token, but expired
+        return False    # valid token, but expired
     except BadSignature:
-        return "Invalid token!"    # invalid token
-    return f"Success! Welcome {data['username']}."
+        return False    # invalid token
+    return True
 
 api.add_resource(listAll, '/listAll', '/listAll/<string:dataType>')
 # api.add_resource(listAll, '/listAll/<str:dataType>')
@@ -194,9 +227,9 @@ api.add_resource(listOpenOnly, '/listOpenOnly', '/listOpenOnly/<string:dataType>
 api.add_resource(listCloseOnly, '/listCloseOnly', '/listCloseOnly/<string:dataType>')
 # api.add_resource(listCloseOnly, '/listCloseOnly/<str:dataType>')\
 
-api.add_resource(register, '/register')
+api.add_resource(register, '/register', '/register/')
 
-api.add_resource(login, '/login')
+api.add_resource(token, '/token', '/token/')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', debug=True)
